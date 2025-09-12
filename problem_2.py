@@ -16,14 +16,14 @@ def weighted_row_sum_kernel(
     """
     # 1. Get the row index for the current program instance.
     #    Hint: Use tl.program_id(axis=0).
-    row_idx = ...
+    row_idx = tl.program_id(axis=0)
 
     # 2. Create a pointer to the start of the current row in the input tensor X.
     #    Hint: The offset depends on the row index and the number of columns (N_COLS).
-    row_start_ptr = ...
+    row_start_ptr = X_ptr + row_idx * N_COLS
     
     # 3. Create a pointer for the output vector Y.
-    output_ptr = ...
+    output_ptr = 
 
     # 4. Initialize an accumulator for the sum of the products for a block.
     #    This should be a block-sized tensor of zeros.
