@@ -37,7 +37,7 @@ class FlashAttention2Function(torch.autograd.Function):
                 # Loop over query tiles: main code
                 for i in range(N_Q_tiles):
                     q_start = i * Q_TILE_SIZE
-                    q_end = min((i + 1) * Q_TILE_SIZE, N_Q) # Plus 1 due to Python indexing
+                    q_end = min((i + 1) * Q_TILE_SIZE, N_Q) 
                     Q_tile = Q_bh[q_start:q_end, :]
 
                     # Initialize accumulators for this query tile

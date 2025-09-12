@@ -16,7 +16,17 @@ def row_sum_kernel(
 ):
     
     # Get the unique row index for this program instance
-    pid_m = tl.program_id(axis=0)  # Row index in the grid (0 to M-1)
+    pid_m = tl.program_id(axis=0)  # Row index in the grid (0 to M-1). Here we only take the row index as we from 2D to 1D output
+    # triton launches a grid of programs, one per row. pid_m is the row index this program will handle.
+    '''
+    Grid along axis=0
+    Row 0  -> program 0
+    Row 1  -> program 1
+    Row 2  -> program 2
+    ...
+    Row M-1 -> program M-1
+    '''
+    # Each program independently sums one row
 
     # Calculate the starting pointer for the assigned row in X
     row_start_ptr = X_ptr + pid_m * D
@@ -25,9 +35,9 @@ def row_sum_kernel(
     accumulator = 0.0
 
     # Loop over the row in blocks (titles):
-    for d_offset in range(0, tl.cdiv(D, BLOCK_SIZE_D)):
+    for d_offset in range(0, tl.cdiv(D, BLOCK_SIZE_D)): # tl.cdiv(D, BLOCK_SIZE_D) retiurns the ceiling of D / BLOCK_SIZE_D
         # Create offsets and a mask for the current tile.
-        d_offsets = d_offset * BLOCK_SIZE_D + tl.arange(0, BLOCK_SIZE_D)
+        d_offsets = d_offset * BLOCK_SIZE_D + tl.arange(0, BLOCK_SIZE_D) # length from 0 to block size D, for example BLOCK_SIZE_D = 1024, d_offsets = [0, 1, 2, ..., 1023] if d_offset = 0
         d_mask = d_offsets < D
 
 

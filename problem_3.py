@@ -25,15 +25,24 @@ def _flash_attention_forward_kernel(
     """
     # 1. Identify the block of queries and the batch/head to be processed.
     q_block_idx = tl.program_id(axis=0)
-    batch_head_idx = tl.program_id(axis=1)
+    batch_head_idx = tl.program_id(axis=1) # batch * n_heads index
     
-    batch_idx = batch_head_idx // N_HEADS
-    head_idx = batch_head_idx % N_HEADS
+    batch_idx = batch_head_idx // N_HEADS # integer division gives the number of full head groups, which corresponds to the batch index
+    head_idx = batch_head_idx % N_HEADS # modulus gives the position within the batch, which corresponds to the head index
+    '''
+    batch_head_idx	batch_idx = idx//3	head_idx = idx%3
+    0	            0	                0
+    1	            0	                1
+    2	            0	                2
+    3	            1	                0
+    4	            1	                1
+    5	            1	                2
+    '''
 
     # 2. Initialize pointers and accumulators for the online softmax.
-    m_i = tl.full([BLOCK_M], -float('inf'), dtype=tl.float32)
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+    m_i = tl.full([BLOCK_M], -float('inf'), dtype=tl.float32) # running max for each query row
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32) # denominator of the softmax
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32) # accumulator for the weighted sum of values 
 
     # 3. Load the block of queries (Q_i).
     q_offsets = (q_block_idx * BLOCK_M + tl.arange(0, BLOCK_M))
@@ -64,7 +73,10 @@ def _flash_attention_forward_kernel(
         # --- STUDENT IMPLEMENTATION REQUIRED HERE ---
         # Implement the online softmax update logic.
         # 1. Find the new running maximum (`m_new`).
+        m_new = tl.maximum(m_i, tl.max(s_ij, axis=1))
+
         # 2. Rescale the existing accumulator (`acc`) and denominator (`l_i`).
+        
         # 3. Compute the attention probabilities for the current tile (`p_ij`).
         # 4. Update the accumulator `acc` using `p_ij` and `v_block`.
         # 5. Update the denominator `l_i`.
@@ -90,8 +102,8 @@ def flash_attention_forward(q, k, v, is_causal=False):
     batch, n_heads, seq_len, head_dim = q.shape
     o = torch.empty_like(q)
     softmax_scale = 1.0 / math.sqrt(head_dim)
-    BLOCK_M, BLOCK_N = 128, 64
-    grid = (triton.cdiv(seq_len, BLOCK_M), batch * n_heads)
+    BLOCK_M, BLOCK_N = 128, 64  # BLOCK_M is for queries, BLOCK_N is for keys/values
+    grid = (triton.cdiv(seq_len, BLOCK_M), batch * n_heads) # (num_query_blocks, batch * n_heads)
 
     _flash_attention_forward_kernel[grid](
         q, k, v, o,
