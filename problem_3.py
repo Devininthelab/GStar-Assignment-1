@@ -40,15 +40,16 @@ def _flash_attention_forward_kernel(
     '''
 
     # 2. Initialize pointers and accumulators for the online softmax.
-    m_i = tl.full([BLOCK_M], -float('inf'), dtype=tl.float32) # running max for each query row
+    m_i = tl.full([BLOCK_M], -float('inf'), dtype=tl.float32) # running max for each query row, block_M is the size of the query block, similar to Q_tile in the old code
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32) # denominator of the softmax
-    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32) # accumulator for the weighted sum of values 
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32) # accumulator for the weighted sum of values, here is o_i which is the same size as q_block
 
     # 3. Load the block of queries (Q_i).
     q_offsets = (q_block_idx * BLOCK_M + tl.arange(0, BLOCK_M))
     q_ptrs = Q_ptr + batch_idx * q_stride_b + head_idx * q_stride_h + \
              (q_offsets[:, None] * q_stride_s + tl.arange(0, HEAD_DIM)[None, :])
-    q_block = tl.load(q_ptrs, mask=q_offsets[:, None] < SEQ_LEN, other=0.0)
+    q_block = tl.load(q_ptrs, mask=q_offsets[:, None] < SEQ_LEN, other=0.0) # shape [BLOCK_M, HEAD_DIM]
+    q_block = q_block.to(tl.float32)  # Convert to float32 for computation
     
     # PyTorch softmax is exp(x), Triton is exp2(x * log2(e)), log2(e) is approx 1.44269504
     qk_scale = softmax_scale * 1.44269504
@@ -59,7 +60,8 @@ def _flash_attention_forward_kernel(
         k_offsets = start_n + tl.arange(0, BLOCK_N)
         k_ptrs = K_ptr + batch_idx * k_stride_b + head_idx * k_stride_h + \
                  (k_offsets[None, :] * k_stride_s + tl.arange(0, HEAD_DIM)[:, None])
-        k_block = tl.load(k_ptrs, mask=k_offsets[None, :] < SEQ_LEN, other=0.0)
+        k_block = tl.load(k_ptrs, mask=k_offsets[None, :] < SEQ_LEN, other=0.0) # shape [BLOCK_N, HEAD_DIM]
+        k_block = k_block.to(tl.float32)  # Convert to float32 for computation
         
         # Compute attention scores S_ij = Q_i * K_j^T
         s_ij = tl.dot(q_block, k_block)
@@ -68,7 +70,8 @@ def _flash_attention_forward_kernel(
         # Load V_j
         v_ptrs = V_ptr + batch_idx * v_stride_b + head_idx * v_stride_h + \
                  (k_offsets[:, None] * v_stride_s + tl.arange(0, HEAD_DIM)[None, :])
-        v_block = tl.load(v_ptrs, mask=k_offsets[:, None] < SEQ_LEN, other=0.0)
+        v_block = tl.load(v_ptrs, mask=k_offsets[:, None] < SEQ_LEN, other=0.0) # shape [BLOCK_N, HEAD_DIM]
+        v_block = v_block.to(tl.float32)  # Convert to float32 for computation
 
         # --- STUDENT IMPLEMENTATION REQUIRED HERE ---
         # Implement the online softmax update logic.
@@ -76,12 +79,19 @@ def _flash_attention_forward_kernel(
         m_new = tl.maximum(m_i, tl.max(s_ij, axis=1))
 
         # 2. Rescale the existing accumulator (`acc`) and denominator (`l_i`).
+        l_i_normalized_factor = tl.exp2(m_i - m_new)
+        acc_normalized = acc * l_i_normalized_factor[:, None]
         
         # 3. Compute the attention probabilities for the current tile (`p_ij`).
+        p_ij = tl.exp2(s_ij - m_new[:, None]) # equals P_tilde_ij in the old code
+
         # 4. Update the accumulator `acc` using `p_ij` and `v_block`.
+        acc = acc_normalized + tl.dot(p_ij, v_block)
+
         # 5. Update the denominator `l_i`.
+        l_i = l_i * l_i_normalized_factor + tl.sum(p_ij, axis=1)
         # 6. Update the running maximum `m_i` for the next iteration.
-        pass
+        m_i = m_new
         # --- END OF STUDENT IMPLEMENTATION ---
 
 
@@ -104,6 +114,11 @@ def flash_attention_forward(q, k, v, is_causal=False):
     softmax_scale = 1.0 / math.sqrt(head_dim)
     BLOCK_M, BLOCK_N = 128, 64  # BLOCK_M is for queries, BLOCK_N is for keys/values
     grid = (triton.cdiv(seq_len, BLOCK_M), batch * n_heads) # (num_query_blocks, batch * n_heads)
+    '''
+    Can imagine the grid as follow:
+    axis 0 is for query blocks, axis 1 is for batch*head combinations; FOR batch * heads combinations, image now the batch size and heads are flattened into one dimension
+    '''
+
 
     _flash_attention_forward_kernel[grid](
         q, k, v, o,

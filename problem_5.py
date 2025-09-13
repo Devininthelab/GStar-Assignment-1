@@ -35,8 +35,8 @@ def _flash_attention_forward_gqa_kernel(
     # Your goal is to map the current query head (q_head_idx) to its corresponding shared key/value head (kv_head_idx).
     # 1. Calculate how many query heads are in each group.
     # 2. Use integer division to find the correct kv_head_idx.
-    
-    kv_head_idx = 0 # Placeholder: Replace with your calculation
+
+    kv_head_idx = q_head_idx // (N_Q_HEADS // N_KV_HEADS)
     # --- END OF STUDENT IMPLEMENTATION ---
 
 
@@ -50,6 +50,7 @@ def _flash_attention_forward_gqa_kernel(
     q_ptrs = Q_ptr + batch_idx * q_stride_b + q_head_idx * q_stride_h + \
              (q_offsets[:, None] * q_stride_s + tl.arange(0, HEAD_DIM)[None, :])
     q_block = tl.load(q_ptrs, mask=q_offsets[:, None] < SEQ_LEN, other=0.0)
+    q_block = q_block.to(tl.float32)  # Convert to float32 for computation
     
     qk_scale = softmax_scale * 1.44269504
     
@@ -59,7 +60,42 @@ def _flash_attention_forward_gqa_kernel(
         # 1. Modify the pointer arithmetic for K and V to use your `kv_head_idx`.
         # 2. Reuse your working implementation for the online softmax update
         #    from your solution to Problem 4.
-        pass
+        k_offsets = start_n + tl.arange(0, BLOCK_N)
+        k_ptrs = K_ptr + batch_idx * k_stride_b + kv_head_idx * k_stride_h + \
+                 (k_offsets[None, :] * k_stride_s + tl.arange(0, HEAD_DIM)[:, None])
+        k_block = tl.load(k_ptrs, mask=k_offsets[None, :] < SEQ_LEN, other=0.0)
+        k_block = k_block.to(tl.float32)
+
+         # Load V_j
+        v_ptrs = V_ptr + batch_idx * v_stride_b + kv_head_idx * v_stride_h + \
+                 (k_offsets[:, None] * v_stride_s + tl.arange(0, HEAD_DIM)[None, :])
+        v_block = tl.load(v_ptrs, mask=k_offsets[:, None] < SEQ_LEN, other=0.0) # shape [BLOCK_N, HEAD_DIM]
+        v_block = v_block.to(tl.float32)  # Convert to float32 for computation
+
+        #  2. Compute the attention scores (S_ij).
+        # Compute attention scores S_ij = Q_i * K_j^T
+        s_ij = tl.dot(q_block, k_block) * qk_scale
+
+
+        # 3. Update the online softmax statistics (m_i, l_i) and the accumulator (acc).
+        # Implement the online softmax update logic.
+        # 1. Find the new running maximum (`m_new`).
+        m_new = tl.maximum(m_i, tl.max(s_ij, axis=1))
+
+        # 2. Rescale the existing accumulator (`acc`) and denominator (`l_i`).
+        l_i_normalized_factor = tl.exp2(m_i - m_new)
+        acc_normalized = acc * l_i_normalized_factor[:, None]
+        
+        # 3. Compute the attention probabilities for the current tile (`p_ij`).
+        p_ij = tl.exp2(s_ij - m_new[:, None]) # equals P_tilde_ij in the old code
+
+        # 4. Update the accumulator `acc` using `p_ij` and `v_block`.
+        acc = acc_normalized + tl.dot(p_ij, v_block)
+
+        # 5. Update the denominator `l_i`.
+        l_i = l_i * l_i_normalized_factor + tl.sum(p_ij, axis=1)
+        # 6. Update the running maximum `m_i` for the next iteration.
+        m_i = m_new
         # --- END OF STUDENT IMPLEMENTATION ---
 
     # --- Phase 2: Diagonal Blocks ---
@@ -69,7 +105,47 @@ def _flash_attention_forward_gqa_kernel(
         # 1. Modify the pointer arithmetic for K and V to use your `kv_head_idx`.
         # 2. Reuse your working implementation for the masked online softmax
         #    update from your solution to Problem 4.
-        pass
+        # Load K_j
+        k_offsets = start_n + tl.arange(0, BLOCK_N)
+        k_ptrs = K_ptr + batch_idx * k_stride_b + kv_head_idx * k_stride_h + \
+                 (k_offsets[None, :] * k_stride_s + tl.arange(0, HEAD_DIM)[:, None])
+        k_block = tl.load(k_ptrs, mask=k_offsets[None, :] < SEQ_LEN, other=0.0)
+        k_block = k_block.to(tl.float32)
+
+         # Load V_j
+        v_ptrs = V_ptr + batch_idx * v_stride_b + kv_head_idx * v_stride_h + \
+                 (k_offsets[:, None] * v_stride_s + tl.arange(0, HEAD_DIM)[None, :])
+        v_block = tl.load(v_ptrs, mask=k_offsets[:, None] < SEQ_LEN, other=0.0) # shape [BLOCK_N, HEAD_DIM]
+        v_block = v_block.to(tl.float32)  # Convert to float32 for computation
+
+        #  2. Compute the attention scores (S_ij).
+        # Compute attention scores S_ij = Q_i * K_j^T
+        s_ij = tl.dot(q_block, k_block) * qk_scale
+        
+        # Apply causal mask: queries can only attend to keys at same position or earlier
+        mask = q_offsets[:, None] >= k_offsets[None, :]
+        s_ij = tl.where(mask, s_ij, -float('inf'))
+
+
+        # 3. Update the online softmax statistics (m_i, l_i) and the accumulator (acc).
+        # Implement the online softmax update logic.
+        # 1. Find the new running maximum (`m_new`).
+        m_new = tl.maximum(m_i, tl.max(s_ij, axis=1))
+
+        # 2. Rescale the existing accumulator (`acc`) and denominator (`l_i`).
+        l_i_normalized_factor = tl.exp2(m_i - m_new)
+        acc_normalized = acc * l_i_normalized_factor[:, None]
+        
+        # 3. Compute the attention probabilities for the current tile (`p_ij`).
+        p_ij = tl.exp2(s_ij - m_new[:, None]) # equals P_tilde_ij in the old code
+
+        # 4. Update the accumulator `acc` using `p_ij` and `v_block`.
+        acc = acc_normalized + tl.dot(p_ij, v_block)
+
+        # 5. Update the denominator `l_i`.
+        l_i = l_i * l_i_normalized_factor + tl.sum(p_ij, axis=1)
+        # 6. Update the running maximum `m_i` for the next iteration.
+        m_i = m_new
         # --- END OF STUDENT IMPLEMENTATION ---
 
     # 4. Normalize and write the final output block.
