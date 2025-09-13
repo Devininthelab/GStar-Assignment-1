@@ -37,6 +37,23 @@ def _flash_attention_forward_gqa_kernel(
     # 2. Use integer division to find the correct kv_head_idx.
 
     kv_head_idx = q_head_idx // (N_Q_HEADS // N_KV_HEADS)
+    '''
+    N_Q_HEADS = 8
+    N_KV_HEADS = 2
+    each KV head corresponds to 4 Q heads
+
+    Then 
+    q_head_idx	kv_head_idx
+    0	        0
+    1	        0
+    2	        0
+    3	        0
+    4	        1
+    5	        1
+    6	        1
+    7	        1
+
+    '''
     # --- END OF STUDENT IMPLEMENTATION ---
 
 
