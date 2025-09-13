@@ -105,11 +105,7 @@ def _flash_attention_forward_swa_kernel(
         # 6. Update the running maximum `m_i` for the next iteration.
         m_i = m_new
 
-
-    # 2. Phase 1: Off-Diagonal Blocks (within the window)
-    
-
-    # --- Phase 1: Off-Diagonal Blocks (within the window) ---
+    # 2. Phase 1: Off-Diagonal Blocks (within the window) ---
     for start_n in range(window_start, q_block_idx * BLOCK_M, BLOCK_N):
         # STUDENT IMPLEMENTATION REQUIRED (Part 3: SWA Logic)
         # Hint: You might need to apply the per-element sliding window mask to s_ij.
@@ -157,6 +153,7 @@ def _flash_attention_forward_swa_kernel(
         l_i = l_i * l_i_normalized_factor + tl.sum(p_ij, axis=1)
         # 6. Update the running maximum `m_i` for the next iteration.
         m_i = m_new
+
     # 3. Phase 2: Diagonal Blocks
     diag_start = q_block_idx * BLOCK_M
     for start_n in range(diag_start, (q_block_idx + 1) * BLOCK_M, BLOCK_N):
